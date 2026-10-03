@@ -1,0 +1,492 @@
+<!DOCTYPE html>
+<html lang="tr">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5, viewport-fit=cover">
+    <meta name="theme-color" content="#0f172a">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <title>SENTEZ ELEKTRONİK PHILIPS Servis Takip</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        html { -webkit-text-size-adjust: 100%; }
+        body {
+            margin: 0; min-height: 100dvh;
+            background: #0f172a; color: #e2e8f0;
+            font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif;
+            padding: max(12px, env(safe-area-inset-top)) 12px max(16px, env(safe-area-inset-bottom));
+            display: flex; align-items: center; justify-content: center;
+        }
+        .card {
+            width: 100%; max-width: 400px;
+            background: #1e293b; border: 1px solid rgba(6,182,212,0.35);
+            border-radius: 1rem; box-shadow: 0 20px 50px rgba(0,0,0,0.4); padding: 1.25rem;
+        }
+        .spinner {
+            width: 40px; height: 40px; margin: 0 auto 12px;
+            border: 3px solid rgba(6,182,212,0.2); border-top-color: #06b6d4;
+            border-radius: 50%; animation: spin .8s linear infinite;
+        }
+        @keyframes spin { to { transform: rotate(360deg); } }
+        input, button { font-size: 16px !important; }
+        .btn-call {
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+            background: #334155; color: #fff; font-weight: 600; padding: 14px;
+            border-radius: 12px; text-decoration: none; border: 1px solid #64748b;
+            min-height: 48px;
+        }
+        .btn-call:hover { background: #475569; }
+        .btn-wa {
+            display: flex; align-items: center; justify-content: center; gap: 8px;
+            background: #15803d; color: #fff; font-weight: 600; padding: 14px;
+            border-radius: 12px; text-decoration: none; min-height: 48px;
+        }
+        .btn-wa:hover { background: #16a34a; }
+        .btn-disabled { opacity: 0.45; pointer-events: none; }
+    </style>
+</head>
+<body>
+<div id="app"></div>
+<script>
+const GOOGLE_SHEET_API_URL = 'https://script.google.com/macros/s/AKfycbwDGZMdtstzae_a0rpofyNa75Sx1PycO2gMgam9UHRQ_G2L0fmBz_73fF7oWySb_x4n/exec';
+const COMPANY_CACHE_KEY = 'servis_track_company_v2';
+
+let COMPANY_CONTACT = { phone: '', whatsapp: '', banks: [] };
+
+function escapeHtml(s) {
+    return String(s == null ? '' : s)
+        .replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;')
+        .replace(/"/g,'&quot;').replace(/'/g,'&#39;');
+}
+function digitsOnly(phone) {
+    return String(phone || '').replace(/\D/g, '');
+}
+function toIntl(phone) {
+    let dig = digitsOnly(phone);
+    if (!dig) return '';
+    if (dig.startsWith('0')) dig = '90' + dig.slice(1);
+    else if (!dig.startsWith('90')) dig = '90' + dig;
+    return dig;
+}
+function formatTelHref(phone) {
+    const intl = toIntl(phone);
+    return intl ? ('tel:+' + intl) : '';
+}
+function formatWaHref(phone, msg) {
+    const intl = toIntl(phone);
+    if (!intl) return '';
+    return 'https://wa.me/' + intl + (msg ? ('?text=' + encodeURIComponent(msg)) : '');
+}
+function getParams() {
+    const p = new URLSearchParams(location.search);
+    return { id: String(p.get('takip')||p.get('id')||'').trim(), k: String(p.get('k')||'').trim() };
+}
+
+function jsonpRequest(params, timeoutMs) {
+    const ms = timeoutMs || 10000;
+    return new Promise((resolve, reject) => {
+        const cb = 'jp_' + Date.now() + '_' + Math.floor(Math.random()*1e6);
+        const script = document.createElement('script');
+        let done = false;
+        const finish = (fn, arg) => {
+            if (done) return;
+            done = true;
+            try { delete window[cb]; } catch(e){}
+            try { script.remove(); } catch(e){}
+            fn(arg);
+        };
+        window[cb] = (data) => finish(resolve, data);
+        script.onerror = () => finish(reject, new Error('Bağlantı hatası'));
+        script.src = GOOGLE_SHEET_API_URL + '?' + new URLSearchParams(Object.assign({}, params, { callback: cb }));
+        document.head.appendChild(script);
+        setTimeout(() => finish(reject, new Error('Zaman aşımı')), ms);
+    });
+}
+
+function loadCompanyFromCache() {
+    try {
+        const raw = localStorage.getItem(COMPANY_CACHE_KEY);
+        if (!raw) return null;
+        const o = JSON.parse(raw);
+        if (!o || (!digitsOnly(o.phone) && !digitsOnly(o.whatsapp))) return null;
+        if (o._ts && Date.now() - o._ts > 7 * 24 * 60 * 60 * 1000) return null;
+        COMPANY_CONTACT = { phone: o.phone || '', whatsapp: o.whatsapp || '', banks: Array.isArray(o.banks) ? o.banks : [] };
+        return COMPANY_CONTACT;
+    } catch (e) { return null; }
+}
+function saveCompanyCache(c) {
+    try {
+        localStorage.setItem(COMPANY_CACHE_KEY, JSON.stringify({
+            phone: c.phone || '',
+            whatsapp: c.whatsapp || '',
+            banks: c.banks || [],
+            _ts: Date.now()
+        }));
+    } catch (e) {}
+}
+
+function extractCompany(r) {
+    if (!r) return null;
+    const candidates = [
+        r.company, r.data, r.info, r.settings, r.config,
+        r.companyInfo, r.firma, r.result, r
+    ];
+    for (const o of candidates) {
+        if (!o || typeof o !== 'object') continue;
+        const phone = String(
+            o.phone || o.tel || o.telefon || o.shopPhone || o.shop_phone ||
+            o.firmaTel || o.companyPhone || o.iletisim || o.contactPhone || ''
+        ).trim();
+        const whatsapp = String(
+            o.whatsapp || o.wa || o.shopWhatsApp || o.shop_wa ||
+            o.whatsApp || o.waPhone || phone || ''
+        ).trim();
+        const banks = Array.isArray(o.banks) ? o.banks
+            : (Array.isArray(o.ibanList) ? o.ibanList : []);
+        if (digitsOnly(phone).length >= 10 || digitsOnly(whatsapp).length >= 10) {
+            return { phone, whatsapp: whatsapp || phone, banks };
+        }
+        if (digitsOnly(phone).length >= 7 || digitsOnly(whatsapp).length >= 7) {
+            return { phone, whatsapp: whatsapp || phone, banks };
+        }
+    }
+    if (typeof r.phone === 'string' && digitsOnly(r.phone).length >= 10) {
+        return { phone: r.phone, whatsapp: r.whatsapp || r.phone, banks: [] };
+    }
+    return null;
+}
+
+async function loadCompanyContact(force) {
+    if (!force) {
+        const cached = loadCompanyFromCache();
+        if (cached) return cached;
+    }
+    const actions = [
+        { action: 'getCompany' },
+        { action: 'getCompanyInfo' },
+        { action: 'company' },
+        { action: 'readCompany' },
+        { action: 'read', type: 'company' }
+    ];
+    const results = await Promise.allSettled(
+        actions.map(p => jsonpRequest(p, 6000))
+    );
+    for (const res of results) {
+        if (res.status !== 'fulfilled') continue;
+        const parsed = extractCompany(res.value);
+        if (parsed) {
+            COMPANY_CONTACT = parsed;
+            saveCompanyCache(parsed);
+            return parsed;
+        }
+    }
+    return COMPANY_CONTACT;
+}
+
+function resolveShopPhones(device) {
+    const d = device || {};
+    const candidatesCall = [
+        d.shopPhoneRaw, d.shopPhone, d.shopCall, d.shop_tel, d.firmaTel, d.companyPhone,
+        COMPANY_CONTACT.phone, COMPANY_CONTACT.whatsapp
+    ];
+    const candidatesWa = [
+        d.shopWhatsAppRaw, d.shopWhatsApp, d.shopWa, d.firmaWa,
+        COMPANY_CONTACT.whatsapp, COMPANY_CONTACT.phone,
+        d.shopPhoneRaw, d.shopPhone, d.firmaTel
+    ];
+    let call = '', wa = '';
+    for (const c of candidatesCall) {
+        if (digitsOnly(c).length >= 10) { call = String(c).trim(); break; }
+    }
+    for (const c of candidatesWa) {
+        if (digitsOnly(c).length >= 10) { wa = String(c).trim(); break; }
+    }
+    return { call, wa };
+}
+
+function renderLoading(msg) {
+    document.getElementById('app').innerHTML = `
+        <div class="card text-center py-8">
+            <div class="spinner"></div>
+            <p class="text-cyan-300 font-semibold text-sm">${escapeHtml(msg||'Yükleniyor...')}</p>
+        </div>`;
+}
+function renderError(title, msg) {
+    document.getElementById('app').innerHTML = `
+        <div class="card text-center py-8">
+            <div class="text-4xl mb-3">❌</div>
+            <p class="font-bold text-lg mb-2">${escapeHtml(title)}</p>
+            <p class="text-sm text-slate-400">${escapeHtml(msg||'')}</p>
+        </div>`;
+}
+function renderBlank() {
+    document.getElementById('app').innerHTML = `
+        <div class="card text-center py-8">
+            <div class="text-3xl opacity-40 mb-2">🔍</div>
+            <p class="text-slate-400 text-sm">Servis takip linki gerekli</p>
+        </div>`;
+}
+
+function renderPhoneVerify(deviceId, token) {
+    document.getElementById('app').innerHTML = `
+        <div class="card">
+            <div class="text-center mb-5">
+                <div class="text-3xl mb-2">🔐</div>
+                <h1 class="text-lg font-extrabold text-cyan-400">Servis Takip</h1>
+                <p class="text-xs text-slate-400 mt-1">Doğrulama için telefonunuzun son 4 hanesini girin</p>
+            </div>
+            <input type="tel" id="v4" maxlength="4" inputmode="numeric" pattern="[0-9]*"
+                class="w-full p-4 bg-slate-900 rounded-xl border border-slate-600 text-white text-center text-3xl tracking-[0.35em] mb-3"
+                placeholder="••••" autocomplete="one-time-code">
+            <p id="verr" class="text-xs text-rose-400 text-center min-h-[18px] mb-2 hidden"></p>
+            <button type="button" id="vbtn" class="w-full py-3.5 rounded-xl bg-cyan-600 hover:bg-cyan-500 text-white font-semibold">🔓 Bilgileri Göster</button>
+            <p class="text-center mt-4 text-[11px] text-slate-500">Bu sayfa sadece cihaz sahibi için geçerlidir.</p>
+        </div>`;
+    const inp = document.getElementById('v4');
+    const go = async () => {
+        const val = (inp.value||'').replace(/\D/g,'');
+        const err = document.getElementById('verr');
+        const btn = document.getElementById('vbtn');
+        if (val.length !== 4) {
+            err.textContent = '❌ 4 haneli kod girin';
+            err.classList.remove('hidden');
+            return;
+        }
+        btn.disabled = true; btn.textContent = '⏳ Doğrulanıyor...';
+        try {
+            const [res] = await Promise.all([
+                jsonpRequest({ action: 'verifyTracking', deviceId: deviceId, k: token, last4: val }, 12000),
+                loadCompanyContact(false).catch(() => null)
+            ]);
+            if (res && res.status === 'success' && res.valid && res.device) {
+                renderTracking(res.device);
+                return;
+            }
+            const res2 = await jsonpRequest({ action: 'getDeviceById', deviceId: deviceId }, 12000);
+            if (res2 && res2.device) {
+                const ph = digitsOnly(res2.device.custPhone || '');
+                if (ph.slice(-4) === val) {
+                    renderTracking(res2.device);
+                    return;
+                }
+            }
+            err.textContent = '❌ ' + ((res && res.message) || 'Hatalı kod');
+            err.classList.remove('hidden');
+            inp.value = ''; inp.focus();
+            btn.disabled = false; btn.textContent = '🔓 Bilgileri Göster';
+        } catch (e) {
+            err.textContent = '❌ Bağlantı hatası';
+            err.classList.remove('hidden');
+            btn.disabled = false; btn.textContent = '🔓 Bilgileri Göster';
+        }
+    };
+    document.getElementById('vbtn').onclick = go;
+    inp.addEventListener('keydown', e => { if (e.key === 'Enter') go(); });
+    inp.addEventListener('input', () => { inp.value = inp.value.replace(/\D/g,'').slice(0,4); });
+    setTimeout(() => inp.focus(), 50);
+}
+
+function statusClass(st) {
+    if (st === 'Tamiri Tamamlandı') return 'text-blue-400';
+    if (st === 'Parça Bekliyor') return 'text-purple-400';
+    if (st === 'Teslim Edildi') return 'text-emerald-400';
+    if (st === 'İade') return 'text-rose-400';
+    return 'text-amber-400';
+}
+function borderClass(st) {
+    if (st === 'Parça Bekliyor' || /parça/i.test(st)) return 'border-purple-500';
+    if (st === 'Tamirde' || /tamirde/i.test(st)) return 'border-amber-500';
+    if (st === 'Tamiri Tamamlandı' || /tamamland/i.test(st)) return 'border-blue-500';
+    if (st === 'Teslim Edildi' || /teslim/i.test(st)) return 'border-emerald-500';
+    if (st === 'İade' || /iade/i.test(st)) return 'border-rose-500';
+    return 'border-cyan-500';
+}
+
+function buildHist(device) {
+    const st = device.status || '';
+    let hist = [];
+    const raw = Array.isArray(device.history) ? device.history.slice() : [];
+    if (raw.length) {
+        hist = raw.map(h => ({
+            atTr: String(h.atTr || h.date || device.date || '').split(' ')[0],
+            title: h.title || h.status || '',
+            status: h.status || h.title || '',
+            fault: h.fault || '',
+            action: h.action || '',
+            detail: h.detail || ''
+        }));
+    } else {
+        const d0 = device.date || '';
+        const title = [device.type, device.brand, device.model].filter(Boolean).join(' — ') || 'Cihaz kabul';
+        const lines = [];
+        if (device.complaint) lines.push('📝 Şikayet: ' + device.complaint);
+        if (device.accessories) lines.push('🎒 Aksesuar: ' + device.accessories);
+        hist.push({ atTr: d0, title, status: 'Kabul', fault: '', action: '', detail: lines.join('\n') });
+        if (device.fault) hist.push({ atTr: d0, title: device.fault, status: 'Arıza', fault: '', action: '', detail: '' });
+        if (device.action) hist.push({ atTr: d0, title: device.action, status: 'İşlem', fault: '', action: '', detail: '' });
+        if (st) hist.push({ atTr: d0, title: st, status: st, fault: device.fault || '', action: device.action || '', detail: '' });
+    }
+    const last = hist[hist.length - 1];
+    if (st && (!last || String(last.status || last.title) !== st)) {
+        hist.push({ atTr: device.date || '', title: st, status: st, fault: device.fault || '', action: device.action || '', detail: '' });
+    }
+    return hist;
+}
+
+function contactButtonsHtml(device) {
+    const phones = resolveShopPhones(device);
+    const telHref = formatTelHref(phones.call);
+    const waMsg = 'Merhaba, Servis No: ' + (device.id || '') + ' hakkında bilgi almak istiyorum.';
+    const waHref = formatWaHref(phones.wa, waMsg);
+    return `
+        <div id="contactBtns" class="grid grid-cols-2 gap-2 mb-3">
+            <a class="btn-call ${telHref ? '' : 'btn-disabled'}" href="${telHref || '#'}" ${telHref ? '' : 'onclick="return false;"'}>📞 Ara</a>
+            <a class="btn-wa ${waHref ? '' : 'btn-disabled'}" href="${waHref || '#'}" ${waHref ? 'target="_blank" rel="noopener"' : 'onclick="return false;"'}>💬 WhatsApp</a>
+        </div>
+        ${(!telHref && !waHref) ? '<p id="contactHint" class="text-[11px] text-amber-400/90 text-center mb-2">Firma telefonu yükleniyor…</p>' : '<p id="contactHint" class="hidden"></p>'}`;
+}
+
+function refreshContactButtons(device) {
+    const wrap = document.getElementById('contactBtns');
+    if (!wrap) return;
+    const phones = resolveShopPhones(device);
+    const telHref = formatTelHref(phones.call);
+    const waMsg = 'Merhaba, Servis No: ' + (device.id || '') + ' hakkında bilgi almak istiyorum.';
+    const waHref = formatWaHref(phones.wa, waMsg);
+    wrap.innerHTML = `
+        <a class="btn-call ${telHref ? '' : 'btn-disabled'}" href="${telHref || '#'}" ${telHref ? '' : 'onclick="return false;"'}>📞 Ara</a>
+        <a class="btn-wa ${waHref ? '' : 'btn-disabled'}" href="${waHref || '#'}" ${waHref ? 'target="_blank" rel="noopener"' : 'onclick="return false;"'}>💬 WhatsApp</a>`;
+    const hint = document.getElementById('contactHint');
+    if (hint) {
+        if (!telHref && !waHref) {
+            hint.textContent = 'Firma telefonu tanımlı değil. Panelden Firma Bilgileri kaydedin.';
+            hint.classList.remove('hidden');
+        } else {
+            hint.classList.add('hidden');
+        }
+    }
+}
+
+function renderTracking(device) {
+    window._lastTrackDevice = device;
+    const st = String(device.status || '');
+    if (st === 'Teslim Edildi' || st === 'İade') {
+        document.getElementById('app').innerHTML = `
+            <div class="card text-center py-8">
+                <div class="text-5xl mb-4">✅</div>
+                <p class="text-lg font-bold">${st === 'İade' ? 'Cihaz iade edildi' : 'Cihaz teslim edildi'}</p>
+                <p class="text-xs text-slate-500 mt-3">Bu kayıt için aktif servis süreci bulunmamaktadır.</p>
+            </div>`;
+        return;
+    }
+
+    const banksFromDevice = Array.isArray(device.banks) ? device.banks.filter(b => b && b.iban) : [];
+    const banks = banksFromDevice.length ? banksFromDevice : (COMPANY_CONTACT.banks || []).filter(b => b && b.iban);
+    const showPrice = st === 'Tamiri Tamamlandı' && device.price && String(device.price) !== '0';
+    const showWarranty = st === 'Tamiri Tamamlandı' && device.warrantyMonths && String(device.warrantyMonths) !== '0';
+    const hist = buildHist(device);
+    const histHtml = hist.map(h => {
+        let body = '';
+        if (h.fault) body += `<div class="text-xs text-slate-400"><span class="text-slate-500">Arıza:</span> ${escapeHtml(h.fault)}</div>`;
+        if (h.action) body += `<div class="text-xs text-slate-300"><span class="text-slate-500">İşlem:</span> ${escapeHtml(h.action)}</div>`;
+        if (!h.fault && !h.action && h.detail) {
+            body += String(h.detail).split('\n').filter(Boolean).map(l => `<div class="text-xs text-slate-400">${escapeHtml(l)}</div>`).join('');
+        }
+        return `<div class="bg-slate-900/40 rounded-lg p-3 border-l-4 ${borderClass(h.status||h.title)}">
+            <div class="flex justify-between gap-2 mb-1">
+                <div class="text-sm font-semibold text-slate-100">${escapeHtml(h.title||h.status)}</div>
+                <div class="text-[10px] text-slate-500 whitespace-nowrap">${escapeHtml(h.atTr||'')}</div>
+            </div>${body}</div>`;
+    }).join('');
+
+    let banksHtml = '';
+    if (st === 'Tamiri Tamamlandı' && banks.length) {
+        banksHtml = `<div class="bg-emerald-900/20 rounded-xl p-4 mb-3 border border-emerald-700/40">
+            <div class="text-xs text-emerald-300 font-semibold mb-2">💳 Ödeme — IBAN</div>
+            ${banks.map(b => `<div class="bg-slate-900/50 rounded-lg p-3 border border-emerald-800/40 mb-2 text-left">
+                <div class="text-xs text-emerald-300 font-semibold mb-1">${escapeHtml(b.bank||'Banka')}</div>
+                <div class="text-sm font-mono text-slate-100 break-all select-all">${escapeHtml(b.iban)}</div>
+            </div>`).join('')}
+            <p class="text-[10px] text-slate-500 mt-1">Açıklamaya servis numaranızı yazınız.</p>
+        </div>`;
+    }
+
+    document.getElementById('app').innerHTML = `
+        <div class="card">
+            <div class="text-center mb-4">
+                <h1 class="text-xl font-extrabold text-cyan-400">RİZE</h1>
+                <h1 class="text-xl font-extrabold text-cyan-400">SENTEZ ELEKTRONİK</h1>
+                <h1 class="text-xl font-extrabold text-cyan-400">PHILIPS YETKİLİ SERVİSİ</h1>
+                <h1 class="text-xl font-extrabold text-cyan-400">🔧 Servis Takip</h1>
+                <p class="text-xs text-slate-400 mt-0.5">Cihaz Durum Sorgulama</p>
+            </div>
+            <div class="bg-slate-900/60 rounded-xl p-4 mb-3 border border-cyan-800/40 text-center">
+                <div class="text-xs text-slate-500 mb-1">Servis No</div>
+                <div class="text-xl font-extrabold text-cyan-300 tracking-wide break-all">${escapeHtml(device.id||'')}</div>
+            </div>
+            <div class="bg-slate-700/40 rounded-xl p-4 mb-3 border border-slate-600 space-y-2.5 text-sm text-left">
+                <div><div class="text-xs text-slate-500">Müşteri</div><div class="font-semibold">${escapeHtml(device.custName||'')}</div></div>
+                <div><div class="text-xs text-slate-500">Cihaz</div><div>${escapeHtml(device.type||'')} — ${escapeHtml(device.brand||'')} ${escapeHtml(device.model||'')}</div></div>
+                ${device.complaint ? `<div><div class="text-xs text-slate-500">Şikayet</div><div class="text-slate-200">${escapeHtml(device.complaint)}</div></div>` : ''}
+                ${device.accessories ? `<div><div class="text-xs text-slate-500">Aksesuar</div><div class="text-slate-200">${escapeHtml(device.accessories)}</div></div>` : ''}
+            </div>
+            <div class="bg-slate-700/40 rounded-xl p-4 mb-3 border border-slate-600 text-left">
+                <div class="text-xs text-slate-500 mb-1">Güncel Durum</div>
+                <div class="text-lg font-bold ${statusClass(st)}">${escapeHtml(st)}</div>
+                ${device.date ? `<div class="text-xs text-slate-500 mt-2">📅 Kayıt: ${escapeHtml(device.date)}</div>` : ''}
+            </div>
+            ${hist.length ? `<div class="bg-slate-700/40 rounded-xl p-4 mb-3 border border-slate-600 text-left">
+                <div class="text-xs text-cyan-300 font-semibold mb-3">🔧 Servis İşlemleri — Geçmiş</div>
+                <div class="space-y-2">${histHtml}</div>
+            </div>` : ''}
+            ${showWarranty ? `<div class="bg-blue-900/25 rounded-xl p-3 mb-3 border border-blue-700/40 text-sm text-left"><span class="text-blue-300">🛡️ Garanti:</span> <strong>${escapeHtml(String(device.warrantyMonths))} Ay</strong></div>` : ''}
+            ${showPrice ? `<div class="bg-emerald-900/30 rounded-xl p-4 border border-emerald-700/50 text-center mb-3"><div class="text-xs text-emerald-300 mb-1">Ücret</div><div class="text-2xl font-bold text-emerald-400">${escapeHtml(String(device.price))} TL</div></div>` : ''}
+            ${banksHtml}
+            ${contactButtonsHtml(device)}
+            <p class="text-center mt-1 text-[11px] text-slate-500">Sorularınız için bize ulaşın.</p>
+        </div>`;
+
+    const phones = resolveShopPhones(device);
+    if (!phones.call && !phones.wa) {
+        loadCompanyContact(true).then(() => {
+            if (window._lastTrackDevice === device) refreshContactButtons(device);
+        }).catch(() => {
+            const hint = document.getElementById('contactHint');
+            if (hint) {
+                hint.textContent = 'Firma telefonu tanımlı değil. Panelden Firma Bilgileri kaydedin.';
+                hint.classList.remove('hidden');
+            }
+        });
+    }
+}
+
+async function main() {
+    const { id, k } = getParams();
+    if (!id) { renderBlank(); return; }
+
+    loadCompanyFromCache();
+    renderLoading('Cihaz bilgisi yükleniyor...');
+
+    const devicePromise = jsonpRequest({ action: 'getDeviceById', deviceId: id }, 12000);
+    const companyPromise = loadCompanyContact(false).catch(() => null);
+
+    try {
+        const [res] = await Promise.all([devicePromise, companyPromise]);
+        if (!res || res.status !== 'success' || !res.device) {
+            renderError('Kayıt bulunamadı', 'Servis numarası geçersiz olabilir.');
+            return;
+        }
+        const device = res.device;
+        const dt = String(device.token || '').trim();
+        if (k && dt && k !== dt) {
+            renderError('Geçersiz link', 'Bu takip linki geçersiz veya süresi dolmuş.');
+            return;
+        }
+        renderPhoneVerify(id, k || dt);
+    } catch (e) {
+        renderError('Bağlantı hatası', e.message || String(e));
+    }
+}
+main();
+</script>
+</body>
+</html>
