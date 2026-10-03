@@ -160,25 +160,15 @@ async function loadCompanyContact(force) {
         const cached = loadCompanyFromCache();
         if (cached) return cached;
     }
-    const actions = [
-        { action: 'getCompany' },
-        { action: 'getCompanyInfo' },
-        { action: 'company' },
-        { action: 'readCompany' },
-        { action: 'read', type: 'company' }
-    ];
-    const results = await Promise.allSettled(
-        actions.map(p => jsonpRequest(p, 6000))
-    );
-    for (const res of results) {
-        if (res.status !== 'fulfilled') continue;
-        const parsed = extractCompany(res.value);
+    try {
+        const r = await jsonpRequest({ action: 'getCompany' }, 8000);
+        const parsed = extractCompany(r);
         if (parsed) {
             COMPANY_CONTACT = parsed;
             saveCompanyCache(parsed);
             return parsed;
         }
-    }
+    } catch (e) {}
     return COMPANY_CONTACT;
 }
 
